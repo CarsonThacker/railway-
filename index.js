@@ -1,10 +1,23 @@
 const express = require("express")
 const cors = require("cors")
 const pdfParse = require("pdf-parse")
+const axios = require("axios")
+const https = require("https")
 
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+// Create axios instance with custom settings
+const client = axios.create({
+  timeout: 60000,
+  maxRedirects: 10,
+  httpsAgent: new https.Agent({
+    rejectUnauthorized: false,
+    keepAlive: true,
+  }),
+  validateStatus: (status) => status < 500,
+})
 
 // Health check
 app.get("/", (req, res) => {
@@ -14,7 +27,6 @@ app.get("/", (req, res) => {
 // Check if URL is from a .gov domain
 function isGovUrl(urlString) {
   try {
-    // Try to handle URLs with special characters
     const cleanUrl = urlString.split("?")[0]
     const match = cleanUrl.match(/https?:\/\/([^/]+)/)
     if (match) {
@@ -43,7 +55,7 @@ function extractTitleFromUrl(urlString) {
       return pathMatch[1].replace(/[_-]/g, " ").replace(/\s+/g, " ").trim()
     }
 
-    // Try to get last path segment
+    // Try to get last meaningful path segment
     const segments = decodedUrl.split("/").filter((s) => s && !s.match(/^\d+\.(pdf|html?)$/i))
     if (segments.length > 0) {
       const last = segments[segments.length - 1].replace(/\.(pdf|html?|txt)$/i, "")
@@ -97,6 +109,79 @@ function getHostname(urlString) {
   }
 }
 
+// Try multiple user agents
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+]
+
+// Fetch with retries using different configurations
+async function fetchWithRetry(url) {
+  const errors = []
+
+  for (let i = 0; i < USER_AGENTS.length; i++) {
+    const userAgent = USER_AGENTS[i]
+
+    try {
+      console.log(`Attempt ${i + 1} with UA: ${userAgent.substring(0, 50)}...`)
+
+      const response = await client.get(url, {
+        responseType: "arraybuffer",
+        headers: {
+          "User-Agent": userAgent,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Accept-Encoding": "gzip, deflate, br",
+          Connection: "keep-alive",
+          "Upgrade-Insecure-Requests": "1",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+        },
+      })
+
+      if (response.status === 200) {
+        console.log(`Success on attempt ${i + 1}`)
+        return {
+          data: Buffer.from(response.data),
+          contentType: response.headers["content-type"] || "",
+          finalUrl: response.request?.res?.responseUrl || url,
+        }
+      }
+
+      errors.push(`Attempt ${i + 1}: Status ${response.status}`)
+    } catch (err) {
+      errors.push(`Attempt ${i + 1}: ${err.message}`)
+      console.error(`Attempt ${i + 1} failed:`, err.message)
+    }
+  }
+
+  // Last resort: try with minimal headers
+  try {
+    console.log("Last resort: minimal headers")
+    const response = await client.get(url, {
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent": "curl/7.88.1",
+      },
+    })
+
+    if (response.status === 200) {
+      return {
+        data: Buffer.from(response.data),
+        contentType: response.headers["content-type"] || "",
+        finalUrl: response.request?.res?.responseUrl || url,
+      }
+    }
+    errors.push(`Minimal headers: Status ${response.status}`)
+  } catch (err) {
+    errors.push(`Minimal headers: ${err.message}`)
+  }
+
+  throw new Error(`All fetch attempts failed:\n${errors.join("\n")}`)
+}
+
 // Main extraction endpoint
 app.post("/extract", async (req, res) => {
   try {
@@ -110,38 +195,22 @@ app.post("/extract", async (req, res) => {
       return res.status(400).json({ error: "Only .gov URLs are allowed" })
     }
 
-    console.log(`Fetching: ${url}`)
+    console.log(`\n========================================`)
+    console.log(`Extracting: ${url}`)
+    console.log(`========================================`)
 
-    // Fetch the URL
-    let response
+    let fetchResult
     try {
-      response = await fetch(url, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-        },
-        redirect: "follow",
-      })
+      fetchResult = await fetchWithRetry(url)
     } catch (fetchErr) {
-      console.error("Fetch error:", fetchErr)
-      return res.status(400).json({ error: `Failed to fetch URL: ${fetchErr.message}` })
+      console.error("All fetch attempts failed:", fetchErr.message)
+      return res.status(400).json({
+        error: `Could not fetch the document. The server may be blocking automated requests. Error: ${fetchErr.message}`,
+      })
     }
 
-    if (!response.ok) {
-      return res.status(400).json({ error: `Failed to fetch URL: ${response.status} ${response.statusText}` })
-    }
-
-    const contentType = response.headers.get("content-type") || ""
-    let buffer
-    try {
-      const arrayBuffer = await response.arrayBuffer()
-      buffer = Buffer.from(arrayBuffer)
-    } catch (bufferErr) {
-      console.error("Buffer error:", bufferErr)
-      return res.status(400).json({ error: `Failed to read response: ${bufferErr.message}` })
-    }
+    const { data: buffer, contentType, finalUrl } = fetchResult
+    console.log(`Fetched ${buffer.length} bytes, content-type: ${contentType}`)
 
     // Detect file type
     const urlLower = url.toLowerCase()
@@ -167,16 +236,15 @@ app.post("/extract", async (req, res) => {
         content = pdfData.text || ""
 
         // Get title from PDF metadata or extract from content
-        if (pdfData.info && pdfData.info.Title) {
+        if (pdfData.info && pdfData.info.Title && pdfData.info.Title.trim()) {
           title = pdfData.info.Title
         } else if (content) {
-          // Get first meaningful line as title
           const lines = content.split("\n").filter((l) => l.trim().length > 5)
           const urlTitle = extractTitleFromUrl(url)
-          if (lines.length > 0 && !urlTitle) {
-            title = lines[0].trim().substring(0, 200)
-          } else if (urlTitle) {
+          if (urlTitle) {
             title = urlTitle
+          } else if (lines.length > 0) {
+            title = lines[0].trim().substring(0, 200)
           }
         }
 
@@ -188,7 +256,7 @@ app.post("/extract", async (req, res) => {
 
         names = extractNamesFromText(content, url)
 
-        console.log(`PDF parsed: ${content.length} chars, title: ${title}`)
+        console.log(`PDF parsed: ${content.length} chars, title: "${title}"`)
       } catch (pdfError) {
         console.error("PDF parsing error:", pdfError)
         content = "[PDF content could not be extracted]"
@@ -233,7 +301,7 @@ app.post("/extract", async (req, res) => {
         description = "Webpage from " + hostname
       }
 
-      // Extract text content (simple approach)
+      // Extract text content
       content = html
         .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -245,6 +313,8 @@ app.post("/extract", async (req, res) => {
       names = extractNamesFromText(content, url)
     }
 
+    console.log(`Extraction complete: ${fileType}, title="${title}", names=${names.length}`)
+
     res.json({
       success: true,
       title,
@@ -252,7 +322,7 @@ app.post("/extract", async (req, res) => {
       content: content.substring(0, 50000),
       names,
       fileType,
-      url,
+      url: finalUrl,
     })
   } catch (error) {
     console.error("Extraction error:", error)
