@@ -16,7 +16,7 @@ import { LegalModal } from "@/components/legal-modal"
 import { createClient } from "@/lib/supabase/client"
 import type { Document, User } from "@/lib/types"
 
-const ADMIN_USERNAME = "cdthacker14"
+const ADMIN_USERNAME = "System"
 
 export default function Home() {
   const [darkMode, setDarkMode] = useState(true)
