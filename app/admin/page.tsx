@@ -36,7 +36,7 @@ const CATEGORIES = [
   "Other",
 ]
 
-const ADMIN_USERNAME = "cdthacker14"
+const ADMIN_USERNAME = "System"
 
 const getFileTypeIcon = (type: string) => {
   switch (type) {
