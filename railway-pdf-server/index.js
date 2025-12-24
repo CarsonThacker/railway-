@@ -1,27 +1,15 @@
 const express = require("express")
 const cors = require("cors")
 const pdfParse = require("pdf-parse")
-const axios = require("axios")
-const https = require("https")
+const puppeteer = require("puppeteer")
 
 const app = express()
 app.use(cors())
 app.use(express.json())
 
-// Create axios instance with custom settings
-const client = axios.create({
-  timeout: 60000,
-  maxRedirects: 10,
-  httpsAgent: new https.Agent({
-    rejectUnauthorized: false,
-    keepAlive: true,
-  }),
-  validateStatus: (status) => status < 500,
-})
-
 // Health check
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "PDF Extraction Server" })
+  res.json({ status: "ok", message: "PDF Extraction Server with Puppeteer" })
 })
 
 // Check if URL is from a .gov domain
@@ -53,13 +41,6 @@ function extractTitleFromUrl(urlString) {
     const pathMatch = decodedUrl.match(/\/([^/]+)\.(pdf|html?|txt)$/i)
     if (pathMatch) {
       return pathMatch[1].replace(/[_-]/g, " ").replace(/\s+/g, " ").trim()
-    }
-
-    // Try to get last meaningful path segment
-    const segments = decodedUrl.split("/").filter((s) => s && !s.match(/^\d+\.(pdf|html?)$/i))
-    if (segments.length > 0) {
-      const last = segments[segments.length - 1].replace(/\.(pdf|html?|txt)$/i, "")
-      return last.replace(/[_-]/g, " ").replace(/\s+/g, " ").trim()
     }
 
     return null
@@ -109,77 +90,109 @@ function getHostname(urlString) {
   }
 }
 
-// Try multiple user agents
-const USER_AGENTS = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-  "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-]
+// Fetch using Puppeteer (real browser)
+async function fetchWithPuppeteer(url) {
+  console.log("Launching Puppeteer browser...")
 
-// Fetch with retries using different configurations
-async function fetchWithRetry(url) {
-  const errors = []
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--disable-gpu",
+      "--window-size=1920,1080",
+    ],
+  })
 
-  for (let i = 0; i < USER_AGENTS.length; i++) {
-    const userAgent = USER_AGENTS[i]
-
-    try {
-      console.log(`Attempt ${i + 1} with UA: ${userAgent.substring(0, 50)}...`)
-
-      const response = await client.get(url, {
-        responseType: "arraybuffer",
-        headers: {
-          "User-Agent": userAgent,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Accept-Encoding": "gzip, deflate, br",
-          Connection: "keep-alive",
-          "Upgrade-Insecure-Requests": "1",
-          "Cache-Control": "no-cache",
-          Pragma: "no-cache",
-        },
-      })
-
-      if (response.status === 200) {
-        console.log(`Success on attempt ${i + 1}`)
-        return {
-          data: Buffer.from(response.data),
-          contentType: response.headers["content-type"] || "",
-          finalUrl: response.request?.res?.responseUrl || url,
-        }
-      }
-
-      errors.push(`Attempt ${i + 1}: Status ${response.status}`)
-    } catch (err) {
-      errors.push(`Attempt ${i + 1}: ${err.message}`)
-      console.error(`Attempt ${i + 1} failed:`, err.message)
-    }
-  }
-
-  // Last resort: try with minimal headers
   try {
-    console.log("Last resort: minimal headers")
-    const response = await client.get(url, {
-      responseType: "arraybuffer",
-      headers: {
-        "User-Agent": "curl/7.88.1",
-      },
+    const page = await browser.newPage()
+
+    // Set a real browser viewport and user agent
+    await page.setViewport({ width: 1920, height: 1080 })
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+
+    // Set extra headers
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
     })
 
-    if (response.status === 200) {
-      return {
-        data: Buffer.from(response.data),
-        contentType: response.headers["content-type"] || "",
-        finalUrl: response.request?.res?.responseUrl || url,
-      }
-    }
-    errors.push(`Minimal headers: Status ${response.status}`)
-  } catch (err) {
-    errors.push(`Minimal headers: ${err.message}`)
-  }
+    // Enable request interception to capture PDF data
+    let pdfBuffer = null
+    let contentType = ""
 
-  throw new Error(`All fetch attempts failed:\n${errors.join("\n")}`)
+    await page.setRequestInterception(true)
+
+    page.on("request", (request) => {
+      request.continue()
+    })
+
+    // For PDFs, we need to capture the response directly
+    const urlLower = url.toLowerCase()
+    const isPdfUrl = urlLower.includes(".pdf")
+
+    if (isPdfUrl) {
+      // For PDF files, fetch directly with page.goto and get the response
+      console.log("Fetching PDF directly...")
+
+      const response = await page.goto(url, {
+        waitUntil: "networkidle0",
+        timeout: 60000,
+      })
+
+      if (!response) {
+        throw new Error("No response received")
+      }
+
+      const status = response.status()
+      console.log(`Response status: ${status}`)
+
+      if (status !== 200) {
+        throw new Error(`HTTP ${status}`)
+      }
+
+      contentType = response.headers()["content-type"] || ""
+      pdfBuffer = await response.buffer()
+
+      console.log(`Got ${pdfBuffer.length} bytes, content-type: ${contentType}`)
+    } else {
+      // For HTML pages, load and get content
+      console.log("Fetching HTML page...")
+
+      const response = await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      })
+
+      if (!response) {
+        throw new Error("No response received")
+      }
+
+      const status = response.status()
+      if (status !== 200) {
+        throw new Error(`HTTP ${status}`)
+      }
+
+      contentType = response.headers()["content-type"] || ""
+      const html = await page.content()
+      pdfBuffer = Buffer.from(html, "utf-8")
+    }
+
+    await browser.close()
+
+    return {
+      data: pdfBuffer,
+      contentType,
+      finalUrl: url,
+    }
+  } catch (error) {
+    await browser.close()
+    throw error
+  }
 }
 
 // Main extraction endpoint
@@ -201,15 +214,15 @@ app.post("/extract", async (req, res) => {
 
     let fetchResult
     try {
-      fetchResult = await fetchWithRetry(url)
+      fetchResult = await fetchWithPuppeteer(url)
     } catch (fetchErr) {
-      console.error("All fetch attempts failed:", fetchErr.message)
+      console.error("Puppeteer fetch failed:", fetchErr.message)
       return res.status(400).json({
-        error: `Could not fetch the document. The server may be blocking automated requests. Error: ${fetchErr.message}`,
+        error: `Could not fetch the document: ${fetchErr.message}`,
       })
     }
 
-    const { data: buffer, contentType, finalUrl } = fetchResult
+    const { data: buffer, contentType } = fetchResult
     console.log(`Fetched ${buffer.length} bytes, content-type: ${contentType}`)
 
     // Detect file type
@@ -283,7 +296,7 @@ app.post("/extract", async (req, res) => {
       description = "Document file from " + hostname
       names = extractNamesFromText("", url)
     } else {
-      // Try to parse as HTML
+      // Parse as HTML
       fileType = "webpage"
       const html = buffer.toString("utf-8")
 
@@ -322,7 +335,7 @@ app.post("/extract", async (req, res) => {
       content: content.substring(0, 50000),
       names,
       fileType,
-      url: finalUrl,
+      url,
     })
   } catch (error) {
     console.error("Extraction error:", error)
@@ -332,5 +345,5 @@ app.post("/extract", async (req, res) => {
 
 const PORT = process.env.PORT || 3001
 app.listen(PORT, () => {
-  console.log(`PDF Extraction Server running on port ${PORT}`)
+  console.log(`PDF Extraction Server (Puppeteer) running on port ${PORT}`)
 })
