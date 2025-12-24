@@ -1,6 +1,6 @@
-import express from "express"
-import cors from "cors"
-import pdf from "pdf-parse/lib/pdf-parse.js"
+const express = require("express")
+const cors = require("cors")
+const pdfParse = require("pdf-parse")
 
 const app = express()
 app.use(cors())
@@ -14,15 +14,15 @@ app.get("/", (req, res) => {
 // Check if URL is from a .gov domain
 function isGovUrl(urlString) {
   try {
-    const url = new URL(urlString)
-    return url.hostname.endsWith(".gov")
-  } catch {
-    // Fallback for URLs with special characters
-    const match = urlString.match(/https?:\/\/([^/]+)/)
+    // Try to handle URLs with special characters
+    const cleanUrl = urlString.split("?")[0]
+    const match = cleanUrl.match(/https?:\/\/([^/]+)/)
     if (match) {
-      return match[1].endsWith(".gov")
+      return match[1].toLowerCase().endsWith(".gov")
     }
     return false
+  } catch {
+    return urlString.toLowerCase().includes(".gov")
   }
 }
 
@@ -41,6 +41,13 @@ function extractTitleFromUrl(urlString) {
     const pathMatch = decodedUrl.match(/\/([^/]+)\.(pdf|html?|txt)$/i)
     if (pathMatch) {
       return pathMatch[1].replace(/[_-]/g, " ").replace(/\s+/g, " ").trim()
+    }
+
+    // Try to get last path segment
+    const segments = decodedUrl.split("/").filter((s) => s && !s.match(/^\d+\.(pdf|html?)$/i))
+    if (segments.length > 0) {
+      const last = segments[segments.length - 1].replace(/\.(pdf|html?|txt)$/i, "")
+      return last.replace(/[_-]/g, " ").replace(/\s+/g, " ").trim()
     }
 
     return null
@@ -64,18 +71,30 @@ function extractNamesFromText(text, urlString) {
   } catch {}
 
   // Look for case patterns in text
-  const casePatterns = text.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+v\.\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g)
-  if (casePatterns) {
-    casePatterns.forEach((match) => {
-      const parts = match.split(/\s+v\.\s+/)
-      if (parts.length === 2) {
-        names.add(parts[0].trim())
-        names.add(parts[1].trim())
-      }
-    })
+  if (text) {
+    const casePatterns = text.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+v\.\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g)
+    if (casePatterns) {
+      casePatterns.forEach((match) => {
+        const parts = match.split(/\s+v\.\s+/)
+        if (parts.length === 2) {
+          names.add(parts[0].trim())
+          names.add(parts[1].trim())
+        }
+      })
+    }
   }
 
   return Array.from(names).slice(0, 10)
+}
+
+// Get hostname safely
+function getHostname(urlString) {
+  try {
+    const match = urlString.match(/https?:\/\/([^/]+)/)
+    return match ? match[1] : "gov"
+  } catch {
+    return "gov"
+  }
 }
 
 // Main extraction endpoint
@@ -94,20 +113,35 @@ app.post("/extract", async (req, res) => {
     console.log(`Fetching: ${url}`)
 
     // Fetch the URL
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        Accept: "*/*",
-      },
-    })
+    let response
+    try {
+      response = await fetch(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+        },
+        redirect: "follow",
+      })
+    } catch (fetchErr) {
+      console.error("Fetch error:", fetchErr)
+      return res.status(400).json({ error: `Failed to fetch URL: ${fetchErr.message}` })
+    }
 
     if (!response.ok) {
       return res.status(400).json({ error: `Failed to fetch URL: ${response.status} ${response.statusText}` })
     }
 
     const contentType = response.headers.get("content-type") || ""
-    const buffer = Buffer.from(await response.arrayBuffer())
+    let buffer
+    try {
+      const arrayBuffer = await response.arrayBuffer()
+      buffer = Buffer.from(arrayBuffer)
+    } catch (bufferErr) {
+      console.error("Buffer error:", bufferErr)
+      return res.status(400).json({ error: `Failed to read response: ${bufferErr.message}` })
+    }
 
     // Detect file type
     const urlLower = url.toLowerCase()
@@ -122,32 +156,34 @@ app.post("/extract", async (req, res) => {
     let content = ""
     let names = []
     let fileType = "document"
+    const hostname = getHostname(url)
 
     if (isPdf) {
       fileType = "pdf"
       console.log("Parsing PDF...")
 
       try {
-        const pdfData = await pdf(buffer)
+        const pdfData = await pdfParse(buffer)
         content = pdfData.text || ""
 
         // Get title from PDF metadata or extract from content
-        if (pdfData.info?.Title) {
+        if (pdfData.info && pdfData.info.Title) {
           title = pdfData.info.Title
         } else if (content) {
           // Get first meaningful line as title
           const lines = content.split("\n").filter((l) => l.trim().length > 5)
-          if (lines.length > 0 && !extractTitleFromUrl(url)) {
+          const urlTitle = extractTitleFromUrl(url)
+          if (lines.length > 0 && !urlTitle) {
             title = lines[0].trim().substring(0, 200)
+          } else if (urlTitle) {
+            title = urlTitle
           }
         }
 
         // Get description from first paragraph
         if (content) {
-          const paragraphs = content.split("\n\n").filter((p) => p.trim().length > 20)
-          if (paragraphs.length > 0) {
-            description = paragraphs[0].trim().substring(0, 500)
-          }
+          const cleanContent = content.replace(/\s+/g, " ").trim()
+          description = cleanContent.substring(0, 500)
         }
 
         names = extractNamesFromText(content, url)
@@ -156,24 +192,28 @@ app.post("/extract", async (req, res) => {
       } catch (pdfError) {
         console.error("PDF parsing error:", pdfError)
         content = "[PDF content could not be extracted]"
-        description = "PDF document from " + new URL(url).hostname
+        description = "PDF document from " + hostname
       }
     } else if (isVideo) {
       fileType = "video"
       content = "[Video content]"
-      description = "Video file from " + new URL(url).hostname
+      description = "Video file from " + hostname
+      names = extractNamesFromText("", url)
     } else if (isAudio) {
       fileType = "audio"
       content = "[Audio content]"
-      description = "Audio file from " + new URL(url).hostname
+      description = "Audio file from " + hostname
+      names = extractNamesFromText("", url)
     } else if (isImage) {
       fileType = "image"
       content = "[Image content]"
-      description = "Image file from " + new URL(url).hostname
+      description = "Image file from " + hostname
+      names = extractNamesFromText("", url)
     } else if (isDoc) {
       fileType = "document"
       content = "[Document content - manual review required]"
-      description = "Document file from " + new URL(url).hostname
+      description = "Document file from " + hostname
+      names = extractNamesFromText("", url)
     } else {
       // Try to parse as HTML
       fileType = "webpage"
@@ -189,6 +229,8 @@ app.post("/extract", async (req, res) => {
       const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i)
       if (descMatch) {
         description = descMatch[1].trim()
+      } else {
+        description = "Webpage from " + hostname
       }
 
       // Extract text content (simple approach)
@@ -207,7 +249,7 @@ app.post("/extract", async (req, res) => {
       success: true,
       title,
       description,
-      content,
+      content: content.substring(0, 50000),
       names,
       fileType,
       url,
@@ -222,4 +264,3 @@ const PORT = process.env.PORT || 3001
 app.listen(PORT, () => {
   console.log(`PDF Extraction Server running on port ${PORT}`)
 })
-
