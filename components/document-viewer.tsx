@@ -1,213 +1,69 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { X, FileText, ChevronLeft, ExternalLink, Trash2, Loader2 } from "lucide-react"
+import {
+  X,
+  ChevronLeft,
+  Trash2,
+  Loader2,
+  FileText,
+  Video,
+  Music,
+  ImageIcon,
+  File,
+  Download,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Label } from "@/components/ui/label"
 import { createClient } from "@/lib/supabase/client"
-import type { Document, User } from "@/lib/types"
+import type { DocumentViewerProps } from "./document-viewer-props" // Import DocumentViewerProps
 
-interface DocumentViewerProps {
-  document: Document | null
-  open: boolean
-  onClose: () => void
-  user: User | null
-  onDocumentUpdated: () => void
+const ADMIN_USERNAME = "System admin"
+
+const formatFileSize = (bytes: number | null): string => {
+  if (!bytes) return "Unknown size"
+  if (bytes < 1024) return bytes + " B"
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB"
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB"
 }
 
-const ADMIN_USERNAME = "cdthacker14"
+const getFileTypeIcon = (type: string) => {
+  switch (type) {
+    case "video":
+      return <Video className="w-5 h-5" />
+    case "audio":
+      return <Music className="w-5 h-5" />
+    case "image":
+      return <ImageIcon className="w-5 h-5" />
+    case "pdf":
+      return <FileText className="w-5 h-5" />
+    default:
+      return <File className="w-5 h-5" />
+  }
+}
 
 export function DocumentViewer({ document, open, onClose, user, onDocumentUpdated }: DocumentViewerProps) {
-  const [isEditing, setIsEditing] = useState(false)
-  const [editTitle, setEditTitle] = useState("")
-  const [editDescription, setEditDescription] = useState("")
-  const [editContent, setEditContent] = useState("")
-  const [editNames, setEditNames] = useState("")
-  const [editSourceUrls, setEditSourceUrls] = useState<string[]>([""])
-  const [isSaving, setIsSaving] = useState(false)
-  const [isFetching, setIsFetching] = useState(false)
-  const [error, setError] = useState("")
-  const [moderationStatus, setModerationStatus] = useState("idle")
-  const [moderationFeedback, setModerationFeedback] = useState("")
-  const [moderationIssues, setModerationIssues] = useState<string[]>([])
   const [isDeleting, setIsDeleting] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [error, setError] = useState("")
+  const [imageZoom, setImageZoom] = useState(1)
+  const [imageLoaded, setImageLoaded] = useState(false)
 
   useEffect(() => {
     if (document) {
-      setEditTitle(document.title)
-      setEditDescription(document.description || "")
-      setEditContent(document.content || "")
-      setEditNames(document.names?.join(", ") || "")
-      const urls = document.source_urls?.length
-        ? document.source_urls
-        : document.source_url
-          ? [document.source_url]
-          : [""]
-      setEditSourceUrls(urls.length > 0 ? urls : [""])
-      setIsEditing(false)
-      setError("")
-      setModerationStatus("idle")
-      setModerationFeedback("")
-      setModerationIssues([])
       setShowDeleteConfirm(false)
+      setError("")
+      setImageZoom(1)
+      setImageLoaded(false)
     }
   }, [document])
 
   if (!document || !open) return null
 
   const isAdmin = user?.username === ADMIN_USERNAME
-
-  const addUrlField = () => {
-    setEditSourceUrls([...editSourceUrls, ""])
-  }
-
-  const removeUrlField = (index: number) => {
-    if (editSourceUrls.length > 1) {
-      setEditSourceUrls(editSourceUrls.filter((_, i) => i !== index))
-    }
-  }
-
-  const updateUrl = (index: number, value: string) => {
-    const newUrls = [...editSourceUrls]
-    newUrls[index] = value
-    setEditSourceUrls(newUrls)
-  }
-
-  const fetchFromUrl = async (url: string) => {
-    if (!url.trim()) {
-      setError("Enter a URL first")
-      return
-    }
-
-    setIsFetching(true)
-    setError("")
-
-    try {
-      const response = await fetch("/api/fetch-url-content", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
-      })
-
-      const result = await response.json()
-
-      if (!response.ok) {
-        setError(result.error || "Failed to fetch content")
-        return
-      }
-
-      if (result.data.title) setEditTitle(result.data.title)
-      if (result.data.description) setEditDescription(result.data.description)
-      if (result.data.content) setEditContent(result.data.content)
-      if (result.data.names?.length) setEditNames(result.data.names.join(", "))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch content")
-    } finally {
-      setIsFetching(false)
-    }
-  }
-
-  const handleSave = async () => {
-    if (!user) {
-      setError("You must be logged in to edit")
-      return
-    }
-
-    const validUrls = editSourceUrls.filter((url) => url.trim())
-    if (validUrls.length === 0) {
-      setError("At least one source URL is required")
-      return
-    }
-
-    setIsSaving(true)
-    setError("")
-    setModerationStatus("submitting")
-    setModerationIssues([])
-
-    const supabase = createClient()
-
-    try {
-      const { data: pendingEdit, error: insertError } = await supabase
-        .from("pending_edits")
-        .insert({
-          document_id: document.id,
-          user_id: user.id,
-          username: user.username,
-          pending_title: editTitle.trim(),
-          pending_description: editDescription.trim() || null,
-          pending_content: editContent.trim() || null,
-          pending_names: editNames
-            ? editNames
-                .split(",")
-                .map((n) => n.trim())
-                .filter(Boolean)
-            : null,
-          pending_source_url: validUrls[0],
-          pending_source_urls: validUrls,
-          status: "pending",
-        })
-        .select()
-        .single()
-
-      if (insertError) throw insertError
-
-      await supabase.from("activities").insert({
-        document_id: document.id,
-        user_id: user.id,
-        action: "pending",
-        document_title: editTitle.trim(),
-        username: user.redactedName ? "[Redacted]" : user.username,
-        redacted: user.redactedName || false,
-      })
-
-      setModerationStatus("reviewing")
-
-      const response = await fetch("/api/moderate-edit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pendingEditId: pendingEdit.id }),
-      })
-
-      const result = await response.json()
-
-      if (result.approved) {
-        setModerationStatus("approved")
-        setModerationFeedback(result.reason)
-        setTimeout(() => {
-          setIsEditing(false)
-          setModerationStatus("idle")
-          onDocumentUpdated()
-        }, 1500)
-      } else {
-        setModerationStatus("rejected")
-        setModerationFeedback(result.reason)
-        setModerationIssues(result.issues || [])
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save")
-      setModerationStatus("idle")
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  const resetEdit = () => {
-    setIsEditing(false)
-    setModerationStatus("idle")
-    setModerationIssues([])
-    setEditTitle(document.title)
-    setEditDescription(document.description || "")
-    setEditContent(document.content || "")
-    setEditNames(document.names?.join(", ") || "")
-    const urls = document.source_urls?.length
-      ? document.source_urls
-      : document.source_url
-        ? [document.source_url]
-        : [""]
-    setEditSourceUrls(urls.length > 0 ? urls : [""])
-  }
 
   const handleDelete = async () => {
     if (!user || !isAdmin) {
@@ -221,6 +77,24 @@ export function DocumentViewer({ document, open, onClose, user, onDocumentUpdate
     const supabase = createClient()
 
     try {
+      // Delete file from blob storage
+      if (document.file_url) {
+        await fetch("/api/delete-file", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: document.file_url }),
+        })
+      }
+
+      // Delete thumbnail
+      if (document.thumbnail_url) {
+        await fetch("/api/delete-file", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: document.thumbnail_url }),
+        })
+      }
+
       // Delete related activities first
       await supabase.from("activities").delete().eq("document_id", document.id)
 
@@ -252,79 +126,109 @@ export function DocumentViewer({ document, open, onClose, user, onDocumentUpdate
     })
   }
 
-  const displayUrls = document.source_urls?.length
-    ? document.source_urls
-    : document.source_url
-      ? [document.source_url]
-      : []
+  // Render content based on file type
+  const renderContent = () => {
+    const fileUrl = document.file_url
 
-  const ModerationBanner = () => {
-    if (moderationStatus === "idle") return null
-
-    const statusConfig = {
-      submitting: {
-        icon: <Loader2 className="w-5 h-5 animate-spin" />,
-        title: "Submitting edit...",
-        desc: "Your edit is being submitted",
-        bg: "bg-blue-500/10 border-blue-500/30",
-        text: "text-blue-400",
-      },
-      reviewing: {
-        icon: <Loader2 className="w-5 h-5 animate-spin" />,
-        title: "Validating URLs...",
-        desc: "Checking that all source URLs are accessible",
-        bg: "bg-amber-500/10 border-amber-500/30",
-        text: "text-amber-400",
-      },
-      approved: {
-        icon: <Loader2 className="w-5 h-5" />,
-        title: "Edit saved!",
-        desc: moderationFeedback,
-        bg: "bg-green-500/10 border-green-500/30",
-        text: "text-green-400",
-      },
-      rejected: {
-        icon: <Loader2 className="w-5 h-5" />,
-        title: "Invalid URLs",
-        desc: moderationFeedback,
-        bg: "bg-red-500/10 border-red-500/30",
-        text: "text-red-400",
-      },
+    if (!fileUrl) {
+      return (
+        <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+          <File className="w-12 h-12 mb-3" />
+          <p>No file available</p>
+        </div>
+      )
     }
 
-    const config = statusConfig[moderationStatus]
+    switch (document.file_type) {
+      case "image":
+        return (
+          <div className="relative">
+            {/* Zoom controls */}
+            <div className="sticky top-0 z-10 flex items-center justify-center gap-2 py-2 bg-background/80 backdrop-blur-sm border-b border-border/50">
+              <Button
+                variant="outline"
+                size="icon"
+                className="min-h-[36px] min-w-[36px] bg-transparent"
+                onClick={() => setImageZoom((z) => Math.max(0.5, z - 0.25))}
+              >
+                <ZoomOut className="w-4 h-4" />
+              </Button>
+              <span className="text-sm text-muted-foreground w-16 text-center">{Math.round(imageZoom * 100)}%</span>
+              <Button
+                variant="outline"
+                size="icon"
+                className="min-h-[36px] min-w-[36px] bg-transparent"
+                onClick={() => setImageZoom((z) => Math.min(3, z + 0.25))}
+              >
+                <ZoomIn className="w-4 h-4" />
+              </Button>
+            </div>
+            <div className="overflow-auto p-4">
+              {!imageLoaded && (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+                </div>
+              )}
+              <img
+                src={fileUrl || "/placeholder.svg"}
+                alt={document.title}
+                className="mx-auto transition-transform duration-200"
+                style={{
+                  transform: `scale(${imageZoom})`,
+                  transformOrigin: "top center",
+                  maxWidth: "100%",
+                  display: imageLoaded ? "block" : "none",
+                }}
+                onLoad={() => setImageLoaded(true)}
+              />
+            </div>
+          </div>
+        )
 
-    return (
-      <div className={`mb-4 p-4 rounded-xl border ${config.bg}`}>
-        <div className="flex items-start gap-3">
-          <div className={config.text}>{config.icon}</div>
-          <div className="flex-1">
-            <h4 className={`font-medium ${config.text}`}>{config.title}</h4>
-            <p className="text-sm text-muted-foreground mt-1">{config.desc}</p>
+      case "video":
+        return (
+          <div className="p-4">
+            <video src={fileUrl} controls className="w-full rounded-lg max-h-[60vh]" preload="metadata">
+              Your browser does not support the video tag.
+            </video>
           </div>
-        </div>
-        {moderationStatus === "rejected" && moderationIssues.length > 0 && (
-          <ul className="mt-3 ml-8 space-y-1">
-            {moderationIssues.map((issue, i) => (
-              <li key={i} className="text-sm text-destructive flex items-start gap-1">
-                <span className="mt-0.5">•</span>
-                <span>{issue}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        {moderationStatus === "rejected" && (
-          <div className="mt-3 flex gap-2 ml-8">
-            <Button size="sm" variant="outline" onClick={() => setModerationStatus("idle")} className="text-xs">
-              Try again
-            </Button>
-            <Button size="sm" variant="ghost" onClick={resetEdit} className="text-xs">
-              Cancel edit
+        )
+
+      case "audio":
+        return (
+          <div className="p-6 flex flex-col items-center justify-center">
+            <div className="w-24 h-24 bg-primary/10 rounded-full flex items-center justify-center mb-4">
+              <Music className="w-12 h-12 text-primary" />
+            </div>
+            <audio src={fileUrl} controls className="w-full max-w-md" preload="metadata">
+              Your browser does not support the audio tag.
+            </audio>
+          </div>
+        )
+
+      case "pdf":
+        return (
+          <div className="w-full h-[70vh]">
+            <iframe src={`${fileUrl}#toolbar=1&navpanes=0`} className="w-full h-full border-0" title={document.title} />
+          </div>
+        )
+
+      default:
+        return (
+          <div className="p-6 flex flex-col items-center justify-center">
+            <div className="w-24 h-24 bg-muted rounded-lg flex items-center justify-center mb-4">
+              {getFileTypeIcon(document.file_type)}
+            </div>
+            <p className="text-sm text-muted-foreground mb-4">This file type cannot be previewed in the browser.</p>
+            <Button asChild>
+              <a href={fileUrl} target="_blank" rel="noopener noreferrer" download>
+                <Download className="w-4 h-4 mr-2" />
+                Download File
+              </a>
             </Button>
           </div>
-        )}
-      </div>
-    )
+        )
+    }
   }
 
   return (
@@ -335,59 +239,16 @@ export function DocumentViewer({ document, open, onClose, user, onDocumentUpdate
           <ChevronLeft className="w-5 h-5" />
         </Button>
         <div className="flex-1 min-w-0 text-center">
-          {isEditing && moderationStatus === "idle" ? (
-            <div className="flex items-center justify-center gap-2">
-              <input
-                value={editTitle}
-                onChange={(e) => setEditTitle(e.target.value)}
-                className="text-center font-semibold"
-                placeholder="Document title"
-              />
-            </div>
-          ) : (
-            <>
-              <h1 className="font-semibold text-foreground truncate text-sm">{document.title}</h1>
-              <p className="text-xs text-muted-foreground">{document.category}</p>
-            </>
-          )}
+          <h1 className="font-semibold text-foreground truncate text-sm">{document.title}</h1>
+          <p className="text-xs text-muted-foreground">{document.category}</p>
         </div>
         <div className="flex items-center gap-2">
-          {user && !isEditing && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="min-h-[44px] min-w-[44px] shrink-0"
-              onClick={() => setIsEditing(true)}
-            >
-              {/* Edit icon */}
+          {document.file_url && (
+            <Button variant="ghost" size="icon" className="min-h-[44px] min-w-[44px] shrink-0" asChild>
+              <a href={document.file_url} target="_blank" rel="noopener noreferrer" download>
+                <Download className="w-5 h-5" />
+              </a>
             </Button>
-          )}
-          {isEditing && moderationStatus === "idle" && (
-            <>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="min-h-[44px] min-w-[44px] shrink-0 text-destructive"
-                onClick={resetEdit}
-              >
-                {/* XCircle icon */}
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="min-h-[44px] min-w-[44px] shrink-0 text-green-500"
-                onClick={handleSave}
-                disabled={isSaving}
-              >
-                {isSaving ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  {
-                    /* Save icon */
-                  }
-                )}
-              </Button>
-            </>
           )}
           {isAdmin && (
             <Button
@@ -407,9 +268,9 @@ export function DocumentViewer({ document, open, onClose, user, onDocumentUpdate
 
       {/* Content */}
       <ScrollArea className="h-[calc(100vh-80px)]">
-        <div className="p-4">
+        <div className="pb-safe">
           {showDeleteConfirm && (
-            <div className="mb-4 p-4 bg-destructive/10 border border-destructive/30 rounded-lg">
+            <div className="m-4 p-4 bg-destructive/10 border border-destructive/30 rounded-lg">
               <p className="text-sm font-medium text-destructive mb-3">
                 Are you sure you want to delete this document? This action cannot be undone.
               </p>
@@ -432,99 +293,62 @@ export function DocumentViewer({ document, open, onClose, user, onDocumentUpdate
           )}
 
           {error && (
-            <div className="mb-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
+            <div className="m-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
               <p className="text-sm text-destructive">{error}</p>
             </div>
           )}
 
-          {/* Description */}
-          {document.description && (
-            <div className="mb-4">
-              <Label className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider block">
-                Description
-              </Label>
-              <p className="text-sm text-foreground">{document.description}</p>
-            </div>
-          )}
-
-          {/* Source URLs */}
-          <div className="mb-4">
-            <Label className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider block">
-              Source URLs
-            </Label>
-            {displayUrls.length > 0 ? (
-              <div className="space-y-2">
-                {displayUrls.map((url, index) => (
-                  <a
-                    key={index}
-                    href={url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-sm text-primary hover:underline break-all p-2 bg-muted/20 rounded-lg"
-                  >
-                    <ExternalLink className="w-4 h-4 shrink-0" />
-                    <span className="break-all">{url}</span>
-                  </a>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">No source URLs</p>
-            )}
-          </div>
-
-          {/* Related Names */}
-          <div className="mb-4">
-            <Label className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider block">
-              Names Mentioned
-            </Label>
-            {document.names && document.names.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {document.names.map((name, idx) => (
-                  <span
-                    key={idx}
-                    className="bg-primary/10 text-primary px-2.5 py-1 rounded-full text-xs border border-primary/20"
-                  >
-                    {name}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">No names listed</p>
-            )}
-          </div>
-
-          {/* Document Content */}
-          <div className="bg-card border border-border rounded-xl overflow-hidden">
-            <div className="p-4">
-              {/* Document Header */}
-              <div className="text-center mb-4 pb-3 border-b border-border/50">
-                <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">
-                  {document.category} {document.page_count && `• ${document.page_count} pages`}
+          {/* Document Info Card */}
+          <div className="p-4 border-b border-border">
+            <div className="flex items-start gap-3">
+              {document.thumbnail_url ? (
+                <img
+                  src={document.thumbnail_url || "/placeholder.svg"}
+                  alt={document.title}
+                  className="w-16 h-16 object-cover rounded-lg"
+                />
+              ) : (
+                <div className="w-16 h-16 bg-muted rounded-lg flex items-center justify-center">
+                  {getFileTypeIcon(document.file_type)}
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <h2 className="font-medium text-foreground">{document.title}</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  {document.category} • {formatFileSize(document.file_size)}
                 </p>
-                <div className="flex items-center justify-center gap-2">
-                  <FileText className="w-4 h-4 text-muted-foreground" />
-                  <h3 className="text-base font-medium text-foreground">{document.title}</h3>
+                <p className="text-xs text-muted-foreground mt-1">Added {formatDate(document.created_at)}</p>
+              </div>
+            </div>
+
+            {document.description && <p className="mt-3 text-sm text-muted-foreground">{document.description}</p>}
+
+            {/* Related Names */}
+            {document.names && document.names.length > 0 && (
+              <div className="mt-3">
+                <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Names Mentioned
+                </Label>
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {document.names.map((name, idx) => (
+                    <span
+                      key={idx}
+                      className="bg-primary/10 text-primary px-2.5 py-1 rounded-full text-xs border border-primary/20"
+                    >
+                      {name}
+                    </span>
+                  ))}
                 </div>
               </div>
+            )}
+          </div>
 
-              {/* Document Body - Read Only */}
-              <div className="bg-muted/10 rounded-lg p-4 min-h-[300px] border border-border/30">
-                <pre className="text-sm text-foreground leading-relaxed whitespace-pre-wrap font-sans">
-                  {document.content || "No content available for this document."}
-                </pre>
-              </div>
+          {/* File Content */}
+          <div className="bg-card">{renderContent()}</div>
 
-              {/* Document Footer */}
-              <div className="mt-4 pt-3 border-t border-border/50 space-y-1">
-                <p className="text-[10px] text-muted-foreground text-center">
-                  Document ID: {document.id.toUpperCase().slice(0, 8)}
-                </p>
-                <p className="text-[10px] text-muted-foreground text-center">
-                  Added: {formatDate(document.created_at)}
-                  {document.updated_at !== document.created_at && <> • Updated: {formatDate(document.updated_at)}</>}
-                </p>
-              </div>
-            </div>
+          {/* Footer */}
+          <div className="p-4 border-t border-border text-center">
+            <p className="text-xs text-muted-foreground">Document ID: {document.id.toUpperCase().slice(0, 8)}</p>
           </div>
         </div>
       </ScrollArea>

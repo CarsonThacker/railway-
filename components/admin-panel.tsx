@@ -5,7 +5,6 @@ import {
   X,
   Check,
   Trash2,
-  ExternalLink,
   Loader2,
   RefreshCw,
   Sparkles,
@@ -14,6 +13,7 @@ import {
   Music,
   ImageIcon,
   File,
+  Download,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -41,7 +41,14 @@ const CATEGORIES = [
   "Other",
 ]
 
-const ADMIN_USERNAME = "cdthacker14"
+const ADMIN_USERNAME = "System"
+
+const formatFileSize = (bytes: number | null): string => {
+  if (!bytes) return "Unknown"
+  if (bytes < 1024) return bytes + " B"
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB"
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB"
+}
 
 const getFileTypeIcon = (type: string) => {
   switch (type) {
@@ -52,7 +59,6 @@ const getFileTypeIcon = (type: string) => {
     case "image":
       return <ImageIcon className="w-4 h-4" />
     case "pdf":
-    case "document":
       return <FileText className="w-4 h-4" />
     default:
       return <File className="w-4 h-4" />
@@ -61,11 +67,10 @@ const getFileTypeIcon = (type: string) => {
 
 const getFileTypeFromUrl = (url: string): string => {
   const lower = url.toLowerCase()
+  if (lower.match(/\.(jpg|jpeg|png|gif|webp)$/)) return "image"
+  if (lower.match(/\.(mp4|webm|mov)$/)) return "video"
+  if (lower.match(/\.(mp3|wav|ogg|m4a)$/)) return "audio"
   if (lower.endsWith(".pdf")) return "pdf"
-  if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mov")) return "video"
-  if (lower.endsWith(".mp3") || lower.endsWith(".wav") || lower.endsWith(".ogg")) return "audio"
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".gif"))
-    return "image"
   return "document"
 }
 
@@ -75,6 +80,7 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
   const [processingId, setProcessingId] = useState<string | null>(null)
   const [batchProcessing, setBatchProcessing] = useState(false)
   const [editingItem, setEditingItem] = useState<PendingEdit | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({
     title: "",
     description: "",
@@ -119,7 +125,9 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
           content: editForm.content || edit.pending_content,
           category: editForm.category || edit.pending_category,
           names: edit.pending_names,
-          source_url: edit.pending_source_urls?.[0] || edit.pending_source_url,
+          file_url: edit.pending_file_url,
+          file_size: edit.pending_file_size,
+          thumbnail_url: edit.pending_thumbnail_url,
           source_urls: edit.pending_source_urls,
           updated_at: now,
         })
@@ -148,6 +156,7 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
       // Refresh list
       await fetchPendingEdits()
       setEditingItem(null)
+      setPreviewUrl(null)
     } catch (err) {
       console.error("Failed to approve:", err)
     } finally {
@@ -161,6 +170,23 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
     const now = new Date().toISOString()
 
     try {
+      // Delete files from blob storage
+      if (edit.pending_file_url) {
+        await fetch("/api/delete-file", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: edit.pending_file_url }),
+        })
+      }
+
+      if (edit.pending_thumbnail_url) {
+        await fetch("/api/delete-file", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: edit.pending_thumbnail_url }),
+        })
+      }
+
       // Delete the document
       await supabase.from("documents").delete().eq("id", edit.document_id)
 
@@ -187,6 +213,7 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
       // Refresh list
       await fetchPendingEdits()
       setEditingItem(null)
+      setPreviewUrl(null)
     } catch (err) {
       console.error("Failed to reject:", err)
     } finally {
@@ -222,10 +249,30 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
       category: edit.pending_category || "",
       content: edit.pending_content || "",
     })
+    setPreviewUrl(edit.pending_file_url || null)
   }
 
   if (!isAdmin) {
     return null
+  }
+
+  const renderPreview = (url: string, type: string) => {
+    switch (type) {
+      case "image":
+        return <img src={url || "/placeholder.svg"} alt="Preview" className="max-w-full max-h-48 rounded-lg mx-auto" />
+      case "video":
+        return <video src={url} controls className="max-w-full max-h-48 rounded-lg mx-auto" />
+      case "audio":
+        return <audio src={url} controls className="w-full" />
+      case "pdf":
+        return <iframe src={url} className="w-full h-48 rounded-lg border" title="PDF Preview" />
+      default:
+        return (
+          <div className="flex items-center justify-center h-32 bg-muted rounded-lg">
+            <File className="w-8 h-8 text-muted-foreground" />
+          </div>
+        )
+    }
   }
 
   return (
@@ -266,11 +313,37 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
           ) : editingItem ? (
             <div className="space-y-4 p-4 border rounded-lg">
               <div className="flex items-center justify-between">
-                <h3 className="font-medium">Edit Before Approving</h3>
-                <Button variant="ghost" size="sm" onClick={() => setEditingItem(null)}>
-                  Cancel
+                <h3 className="font-medium">Review Submission</h3>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setEditingItem(null)
+                    setPreviewUrl(null)
+                  }}
+                >
+                  Back to List
                 </Button>
               </div>
+
+              {/* File Preview */}
+              {previewUrl && (
+                <div className="border rounded-lg p-4 bg-muted/20">
+                  <Label className="text-xs text-muted-foreground mb-2 block">File Preview</Label>
+                  {renderPreview(previewUrl, getFileTypeFromUrl(previewUrl))}
+                  <div className="flex items-center justify-between mt-2">
+                    <span className="text-xs text-muted-foreground">
+                      {formatFileSize(editingItem.pending_file_size)}
+                    </span>
+                    <Button variant="outline" size="sm" asChild>
+                      <a href={previewUrl} target="_blank" rel="noopener noreferrer" download>
+                        <Download className="w-3 h-3 mr-1" />
+                        Download
+                      </a>
+                    </Button>
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-3">
                 <div>
@@ -304,36 +377,23 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
                     value={editForm.description}
                     onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
                     rows={2}
+                    placeholder="Add a description..."
                   />
                 </div>
 
                 <div>
-                  <Label>Content Summary</Label>
+                  <Label>Content Notes</Label>
                   <Textarea
                     value={editForm.content}
                     onChange={(e) => setEditForm({ ...editForm, content: e.target.value })}
-                    rows={4}
+                    rows={3}
                     placeholder="Add content summary or notes..."
                   />
                 </div>
 
-                <div>
-                  <Label className="text-xs text-muted-foreground">Source URLs</Label>
-                  <div className="space-y-1 mt-1">
-                    {editingItem.pending_source_urls?.map((url, i) => (
-                      <a
-                        key={i}
-                        href={url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs text-blue-500 hover:underline flex items-center gap-1"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        {url.length > 60 ? url.slice(0, 60) + "..." : url}
-                      </a>
-                    ))}
-                  </div>
-                </div>
+                <p className="text-xs text-muted-foreground">
+                  Submitted by {editingItem.username} on {new Date(editingItem.created_at).toLocaleDateString()}
+                </p>
 
                 <div className="flex gap-2 pt-2">
                   <Button
@@ -362,83 +422,78 @@ export function AdminPanel({ open, onClose, user }: AdminPanelProps) {
             </div>
           ) : (
             <div className="space-y-3">
-              {pendingEdits.map((edit) => (
-                <div key={edit.id} className="p-4 border rounded-lg space-y-2">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        {getFileTypeIcon(getFileTypeFromUrl(edit.pending_source_urls?.[0] || ""))}
-                        <h4 className="font-medium">{edit.pending_title}</h4>
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Submitted by {edit.username} • {new Date(edit.created_at).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </div>
+              {pendingEdits.map((edit) => {
+                const fileType = edit.pending_file_url ? getFileTypeFromUrl(edit.pending_file_url) : "document"
 
-                  {edit.pending_source_urls && edit.pending_source_urls.length > 0 && (
-                    <div className="space-y-1">
-                      {edit.pending_source_urls.slice(0, 2).map((url, i) => (
-                        <a
-                          key={i}
-                          href={url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-blue-500 hover:underline flex items-center gap-1"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                          {url.length > 50 ? url.slice(0, 50) + "..." : url}
-                        </a>
-                      ))}
-                      {edit.pending_source_urls.length > 2 && (
-                        <p className="text-xs text-muted-foreground">
-                          +{edit.pending_source_urls.length - 2} more URL(s)
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="flex gap-2 pt-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 min-h-[44px] bg-transparent"
-                      onClick={() => startEditing(edit)}
-                    >
-                      Review & Edit
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      className="min-h-[44px] min-w-[44px]"
-                      onClick={() => handleReject(edit)}
-                      disabled={processingId === edit.id}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      className="min-h-[44px] min-w-[44px] bg-green-600 hover:bg-green-700"
-                      onClick={() => {
-                        setEditForm({
-                          title: edit.pending_title,
-                          description: edit.pending_description || "",
-                          category: edit.pending_category || "",
-                          content: edit.pending_content || "",
-                        })
-                        handleApprove(edit)
-                      }}
-                      disabled={processingId === edit.id}
-                    >
-                      {processingId === edit.id ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
+                return (
+                  <div key={edit.id} className="p-4 border rounded-lg space-y-3">
+                    <div className="flex items-start gap-3">
+                      {/* Thumbnail or icon */}
+                      {edit.pending_thumbnail_url ? (
+                        <img
+                          src={edit.pending_thumbnail_url || "/placeholder.svg"}
+                          alt={edit.pending_title}
+                          className="w-14 h-14 object-cover rounded-lg"
+                        />
                       ) : (
-                        <Check className="w-4 h-4" />
+                        <div className="w-14 h-14 bg-muted rounded-lg flex items-center justify-center">
+                          {getFileTypeIcon(fileType)}
+                        </div>
                       )}
-                    </Button>
+
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-medium truncate">{edit.pending_title}</h4>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {edit.pending_category} • {formatFileSize(edit.pending_file_size)}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          By {edit.username} • {new Date(edit.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1 min-h-[44px] bg-transparent"
+                        onClick={() => startEditing(edit)}
+                      >
+                        Review
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        className="min-h-[44px] min-w-[44px]"
+                        onClick={() => handleReject(edit)}
+                        disabled={processingId === edit.id}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="min-h-[44px] min-w-[44px] bg-green-600 hover:bg-green-700"
+                        onClick={() => {
+                          setEditForm({
+                            title: edit.pending_title,
+                            description: edit.pending_description || "",
+                            category: edit.pending_category || "",
+                            content: edit.pending_content || "",
+                          })
+                          handleApprove(edit)
+                        }}
+                        disabled={processingId === edit.id}
+                      >
+                        {processingId === edit.id ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Check className="w-4 h-4" />
+                        )}
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

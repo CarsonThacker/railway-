@@ -107,6 +107,9 @@ export function AuthModal({ open, onOpenChange, user, onAuthChange }: AuthModalP
         password,
         options: {
           emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || window.location.origin,
+          data: {
+            username: username.trim(),
+          },
         },
       })
 
@@ -125,22 +128,28 @@ export function AuthModal({ open, onOpenChange, user, onAuthChange }: AuthModalP
         const profileData = await profileRes.json()
 
         if (!profileRes.ok) {
-          throw new Error(profileData.error || "Failed to create profile")
+          console.error("Profile creation error:", profileData.error)
         }
 
-        if (data.session) {
-          // Auto-confirmed
-          onAuthChange({
-            id: data.user.id,
-            email: data.user.email || "",
-            username: username.trim(),
-            redactedName: false,
-          })
-          onOpenChange(false)
-          resetForm()
+        if (data.user.identities && data.user.identities.length > 0) {
+          // User was created successfully
+          if (data.session) {
+            // Auto-confirmed - log them in directly
+            onAuthChange({
+              id: data.user.id,
+              email: data.user.email || "",
+              username: username.trim(),
+              redactedName: false,
+            })
+            onOpenChange(false)
+            resetForm()
+          } else {
+            // Email confirmation required
+            setMessage("Check your email for a confirmation link to complete sign up!")
+          }
         } else {
-          // Email confirmation required
-          setMessage("Check your email for a confirmation link to complete sign up!")
+          // User already exists
+          setError("An account with this email already exists")
         }
       }
     } catch (err) {

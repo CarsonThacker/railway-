@@ -1,8 +1,8 @@
 "use client"
 
 import type React from "react"
-import { useState } from "react"
-import { X, CheckCircle, Loader2, Plus, Trash2, FileText, Video, Music, ImageIcon, File, Clock } from "lucide-react"
+import { useState, useRef } from "react"
+import { X, CheckCircle, Loader2, Upload, FileText, Video, Music, ImageIcon, File, Clock, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -29,101 +29,207 @@ const CATEGORIES = [
   "Other",
 ]
 
-type SubmitStatus = "idle" | "submitting" | "submitted"
+type SubmitStatus = "idle" | "uploading" | "submitting" | "submitted"
 
-const isGovUrl = (url: string): boolean => {
-  try {
-    const parsed = new URL(url)
-    return parsed.hostname.endsWith(".gov") || parsed.hostname === "gov"
-  } catch {
-    try {
-      const lowerUrl = url.toLowerCase().trim()
-      return lowerUrl.includes(".gov/") || lowerUrl.includes(".gov")
-    } catch {
-      return false
-    }
-  }
+interface UploadedFile {
+  url: string
+  filename: string
+  size: number
+  type: string
+  fileType: string
+  thumbnailUrl?: string
 }
 
-const getFileTypeFromUrl = (url: string): string => {
-  const lower = url.toLowerCase()
-  if (lower.endsWith(".pdf")) return "pdf"
-  if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mov")) return "video"
-  if (lower.endsWith(".mp3") || lower.endsWith(".wav") || lower.endsWith(".ogg") || lower.endsWith(".m4a"))
-    return "audio"
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".gif"))
-    return "image"
-  if (lower.endsWith(".doc") || lower.endsWith(".docx")) return "document"
-  return "document"
+const formatFileSize = (bytes: number): string => {
+  if (bytes < 1024) return bytes + " B"
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB"
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB"
 }
 
 const getFileTypeIcon = (type: string) => {
   switch (type) {
     case "video":
-      return <Video className="w-3 h-3" />
+      return <Video className="w-5 h-5" />
     case "audio":
-      return <Music className="w-3 h-3" />
+      return <Music className="w-5 h-5" />
     case "image":
-      return <ImageIcon className="w-3 h-3" />
+      return <ImageIcon className="w-5 h-5" />
     case "pdf":
-    case "document":
-    case "html":
-      return <FileText className="w-3 h-3" />
+      return <FileText className="w-5 h-5" />
     default:
-      return <File className="w-3 h-3" />
+      return <File className="w-5 h-5" />
   }
 }
 
-const extractTitleFromUrl = (url: string): string => {
-  try {
-    const pathname = decodeURIComponent(new URL(url).pathname)
-    const parts = pathname.split("/")
-    const filename = parts[parts.length - 1] || ""
-    const nameWithoutExt = filename.replace(/\.(pdf|mp4|mp3|wav|mov|avi|webm|ogg|m4a|jpg|jpeg|png|gif|doc|docx)$/i, "")
-    return nameWithoutExt.replace(/[_-]/g, " ").replace(/%20/g, " ").replace(/\s+/g, " ").trim() || "Untitled Document"
-  } catch {
-    return "Untitled Document"
-  }
+// Compress image before upload
+const compressImage = async (file: File, maxWidth = 1920, quality = 0.8): Promise<Blob> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement("canvas")
+      let { width, height } = img
+
+      // Scale down if too large
+      if (width > maxWidth) {
+        height = (height * maxWidth) / width
+        width = maxWidth
+      }
+
+      canvas.width = width
+      canvas.height = height
+
+      const ctx = canvas.getContext("2d")
+      if (!ctx) {
+        reject(new Error("Failed to get canvas context"))
+        return
+      }
+
+      ctx.drawImage(img, 0, 0, width, height)
+
+      canvas.toBlob(
+        (blob) => {
+          if (blob) {
+            resolve(blob)
+          } else {
+            reject(new Error("Failed to compress image"))
+          }
+        },
+        "image/jpeg",
+        quality,
+      )
+    }
+    img.onerror = () => reject(new Error("Failed to load image"))
+    img.src = URL.createObjectURL(file)
+  })
+}
+
+// Create thumbnail for images
+const createThumbnail = async (file: File): Promise<Blob> => {
+  return compressImage(file, 400, 0.7)
 }
 
 export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModalProps) {
-  const [sourceUrls, setSourceUrls] = useState<string[]>([""])
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
   const [category, setCategory] = useState("")
   const [editableTitle, setEditableTitle] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [error, setError] = useState("")
   const [submitStatus, setSubmitStatus] = useState<SubmitStatus>("idle")
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const resetForm = () => {
-    setSourceUrls([""])
+    setUploadedFiles([])
     setCategory("")
     setEditableTitle("")
     setError("")
     setSubmitStatus("idle")
+    setUploadProgress(0)
   }
 
-  const addUrlField = () => {
-    setSourceUrls([...sourceUrls, ""])
-  }
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
 
-  const removeUrlField = (index: number) => {
-    if (sourceUrls.length > 1) {
-      setSourceUrls(sourceUrls.filter((_, i) => i !== index))
-    }
-  }
+    setSubmitStatus("uploading")
+    setError("")
 
-  const updateUrl = (index: number, value: string) => {
-    const newUrls = [...sourceUrls]
-    newUrls[index] = value
-    setSourceUrls(newUrls)
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      setUploadProgress(Math.round(((i + 0.5) / files.length) * 100))
 
-    // Auto-generate title from first URL
-    if (index === 0 && value.trim()) {
-      const suggestedTitle = extractTitleFromUrl(value)
-      if (!editableTitle || editableTitle === "Untitled Document") {
-        setEditableTitle(suggestedTitle)
+      try {
+        let fileToUpload: File | Blob = file
+        let thumbnailUrl: string | undefined
+
+        // Compress images before upload
+        if (file.type.startsWith("image/")) {
+          const compressed = await compressImage(file)
+          fileToUpload = new File([compressed], file.name, { type: "image/jpeg" })
+
+          // Create and upload thumbnail
+          const thumbnail = await createThumbnail(file)
+          const thumbFormData = new FormData()
+          thumbFormData.append("file", new File([thumbnail], `thumb_${file.name}`, { type: "image/jpeg" }))
+
+          const thumbResponse = await fetch("/api/upload", {
+            method: "POST",
+            body: thumbFormData,
+          })
+
+          if (thumbResponse.ok) {
+            const thumbResult = await thumbResponse.json()
+            thumbnailUrl = thumbResult.url
+          }
+        }
+
+        const formData = new FormData()
+        formData.append("file", fileToUpload)
+
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        })
+
+        const result = await response.json()
+
+        if (!response.ok) {
+          setError(result.error || "Upload failed")
+          continue
+        }
+
+        setUploadedFiles((prev) => [
+          ...prev,
+          {
+            url: result.url,
+            filename: result.filename,
+            size: result.size,
+            type: result.type,
+            fileType: result.fileType,
+            thumbnailUrl,
+          },
+        ])
+
+        // Auto-set title from first file
+        if (!editableTitle && i === 0) {
+          const nameWithoutExt = file.name.replace(/\.[^/.]+$/, "").replace(/[_-]/g, " ")
+          setEditableTitle(nameWithoutExt)
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Upload failed")
       }
     }
+
+    setSubmitStatus("idle")
+    setUploadProgress(0)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }
+
+  const removeFile = async (index: number) => {
+    const file = uploadedFiles[index]
+
+    // Delete from blob storage
+    try {
+      await fetch("/api/delete-file", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: file.url }),
+      })
+
+      if (file.thumbnailUrl) {
+        await fetch("/api/delete-file", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: file.thumbnailUrl }),
+        })
+      }
+    } catch (err) {
+      console.error("Failed to delete file:", err)
+    }
+
+    setUploadedFiles((prev) => prev.filter((_, i) => i !== index))
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -144,15 +250,8 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
       return
     }
 
-    const validUrls = sourceUrls.filter((url) => url.trim())
-    if (validUrls.length === 0) {
-      setError("At least one source URL is required")
-      return
-    }
-
-    const invalidDomainUrls = validUrls.filter((url) => !isGovUrl(url))
-    if (invalidDomainUrls.length > 0) {
-      setError("All URLs must be from a .gov domain")
+    if (uploadedFiles.length === 0) {
+      setError("At least one file is required")
       return
     }
 
@@ -161,7 +260,7 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
     setSubmitStatus("submitting")
 
     const supabase = createClient()
-    const fileType = getFileTypeFromUrl(validUrls[0])
+    const mainFile = uploadedFiles[0]
 
     try {
       // Create document in pending state
@@ -172,10 +271,12 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
           description: `Pending approval - submitted by ${user.username}`,
           category,
           content: null,
-          source_url: validUrls[0],
-          source_urls: validUrls,
+          file_url: mainFile.url,
+          file_size: mainFile.size,
+          file_type: mainFile.fileType,
+          thumbnail_url: mainFile.thumbnailUrl || null,
+          source_urls: uploadedFiles.map((f) => f.url),
           names: null,
-          file_type: fileType,
           created_by: user.id,
         })
         .select()
@@ -192,8 +293,10 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
         pending_description: null,
         pending_content: null,
         pending_names: null,
-        pending_source_url: validUrls[0],
-        pending_source_urls: validUrls,
+        pending_file_url: mainFile.url,
+        pending_file_size: mainFile.size,
+        pending_thumbnail_url: mainFile.thumbnailUrl || null,
+        pending_source_urls: uploadedFiles.map((f) => f.url),
         pending_category: category,
         status: "pending",
       })
@@ -226,7 +329,7 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
   }
 
   const handleClose = () => {
-    if (submitStatus === "submitting") return
+    if (submitStatus === "submitting" || submitStatus === "uploading") return
     resetForm()
     onClose()
   }
@@ -242,7 +345,7 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
               size="icon"
               className="absolute right-4 top-4"
               onClick={handleClose}
-              disabled={submitStatus === "submitting"}
+              disabled={submitStatus === "submitting" || submitStatus === "uploading"}
             >
               <X className="w-5 h-5" />
             </Button>
@@ -270,6 +373,80 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
 
           {submitStatus !== "submitted" && (
             <>
+              {/* File Upload Area */}
+              <div className="space-y-2">
+                <Label>Upload Files *</Label>
+                <div
+                  className="border-2 border-dashed border-border rounded-lg p-6 text-center cursor-pointer hover:border-primary/50 transition-colors"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                    disabled={submitStatus === "uploading"}
+                  />
+                  {submitStatus === "uploading" ? (
+                    <div className="space-y-2">
+                      <Loader2 className="w-8 h-8 mx-auto animate-spin text-primary" />
+                      <p className="text-sm text-muted-foreground">Uploading... {uploadProgress}%</p>
+                      <div className="w-full bg-muted rounded-full h-2">
+                        <div
+                          className="bg-primary h-2 rounded-full transition-all"
+                          style={{ width: `${uploadProgress}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <Upload className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
+                      <p className="text-sm text-muted-foreground">Click or drag files here</p>
+                      <p className="text-xs text-muted-foreground mt-1">Images, PDFs, videos, audio (max 10MB each)</p>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Uploaded Files List */}
+              {uploadedFiles.length > 0 && (
+                <div className="space-y-2">
+                  <Label>Uploaded Files ({uploadedFiles.length})</Label>
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                    {uploadedFiles.map((file, index) => (
+                      <div key={index} className="flex items-center gap-3 p-2 bg-muted/30 rounded-lg">
+                        {file.thumbnailUrl ? (
+                          <img
+                            src={file.thumbnailUrl || "/placeholder.svg"}
+                            alt={file.filename}
+                            className="w-10 h-10 object-cover rounded"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 bg-muted rounded flex items-center justify-center">
+                            {getFileTypeIcon(file.fileType)}
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{file.filename}</p>
+                          <p className="text-xs text-muted-foreground">{formatFileSize(file.size)}</p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="min-h-[36px] min-w-[36px] text-destructive hover:text-destructive"
+                          onClick={() => removeFile(index)}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label htmlFor="title">Title *</Label>
                 <Input
@@ -298,70 +475,20 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
                 </Select>
               </div>
 
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label>Source URLs (.gov only) *</Label>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={addUrlField}
-                    disabled={submitStatus === "submitting"}
-                    className="h-8 text-xs gap-1"
-                  >
-                    <Plus className="w-3 h-3" />
-                    Add URL
-                  </Button>
-                </div>
-                <div className="space-y-2">
-                  {sourceUrls.map((url, index) => (
-                    <div key={index} className="flex gap-2">
-                      <div className="flex-1 relative">
-                        <Input
-                          type="url"
-                          value={url}
-                          onChange={(e) => updateUrl(index, e.target.value)}
-                          placeholder="https://www.justice.gov/..."
-                          className="min-h-[44px] pr-10"
-                          disabled={submitStatus === "submitting"}
-                        />
-                        {url.trim() && (
-                          <div className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                            {getFileTypeIcon(getFileTypeFromUrl(url))}
-                          </div>
-                        )}
-                      </div>
-                      {sourceUrls.length > 1 && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removeUrlField(index)}
-                          disabled={submitStatus === "submitting"}
-                          className="min-h-[44px] min-w-[44px] text-destructive hover:text-destructive"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
               <div className="flex gap-3 pt-4">
                 <Button
                   type="button"
                   variant="outline"
                   className="flex-1 min-h-[44px] bg-transparent"
                   onClick={handleClose}
-                  disabled={submitStatus === "submitting"}
+                  disabled={submitStatus === "submitting" || submitStatus === "uploading"}
                 >
                   Cancel
                 </Button>
                 <Button
                   type="submit"
                   className="flex-1 min-h-[44px]"
-                  disabled={isLoading || !editableTitle.trim() || !category || !sourceUrls[0]?.trim()}
+                  disabled={isLoading || !editableTitle.trim() || !category || uploadedFiles.length === 0}
                 >
                   {isLoading ? (
                     <>
@@ -378,7 +505,7 @@ export function AddDocumentModal({ open, onClose, onAdd, user }: AddDocumentModa
               </div>
 
               <p className="text-xs text-center text-muted-foreground">
-                Documents require admin approval before being published. Only .gov URLs are accepted.
+                Documents require admin approval before being published.
               </p>
             </>
           )}

@@ -15,6 +15,9 @@ export interface Document {
   page_count: number | null
   names: string[] | null
   file_type: string
+  file_url: string | null
+  file_size: number | null
+  thumbnail_url: string | null
   source_url: string | null
   source_urls: string[] | null
   created_by: string | null
@@ -50,6 +53,9 @@ export interface PendingEdit {
   pending_content: string | null
   pending_names: string[] | null
   pending_source_urls: string[] | null
+  pending_file_url: string | null
+  pending_file_size: number | null
+  pending_thumbnail_url: string | null
   pending_category: string | null
   status: "pending" | "approved" | "rejected"
   ai_feedback: string | null
